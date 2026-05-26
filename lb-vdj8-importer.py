@@ -1,4 +1,4 @@
-#!/home/maximizzar/.local/src/listenbrainz_vdj8_importer/.venv/bin/python
+#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2025 maximizzar <mail@maximizzar.de>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
@@ -14,8 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from platformdirs import user_config_dir
 
-from liblistenbrainz.errors import ListenBrainzAPIException, InvalidSubmitListensPayloadException, \
-    InvalidAuthTokenException
+from liblistenbrainz.errors import (
+    ListenBrainzAPIException,
+    InvalidSubmitListensPayloadException,
+    InvalidAuthTokenException,
+)
 from tabulate import tabulate
 
 
@@ -25,13 +28,21 @@ def print_listens(listens: list[liblistenbrainz.Listen]):
     :param listens: a list of liblistenbrainz.Listen objects
     """
     table_data = []
-    for l in listens:
-        table_data.append({
-            "artist": l.artist_name,
-            "track": l.track_name,
-            "time": datetime.fromtimestamp(l.listened_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        })
-    print(tabulate(table_data, headers="keys", tablefmt="grid"))
+    for L in listens:
+        table_data.append(
+            {
+                "artist": L.artist_name,
+                "track": L.track_name,
+                "time": datetime.fromtimestamp(L.listened_at, tz=timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+            }
+        )
+    print(
+        tabulate(
+            table_data, headers="keys", tablefmt="grid", maxcolwidths=[20, 20, None]
+        )
+    )
 
 
 def parse_extvdj_line(line) -> liblistenbrainz.Listen | None:
@@ -46,8 +57,9 @@ def parse_extvdj_line(line) -> liblistenbrainz.Listen | None:
     listen: liblistenbrainz.Listen = liblistenbrainz.Listen(
         artist_name=fields.get("artist"),
         track_name=fields.get("title"),
-
         listened_at=int(fields.get("lastplaytime")),
+        listening_from="VirtualDJ",
+        additional_info={"media_player": "VirtualDJ"},
     )
 
     if listen.artist_name and listen.track_name:
@@ -74,65 +86,81 @@ def parse_vdj_playlist(playlist_file) -> list[liblistenbrainz.Listen]:
 
 
 def main(
-        playlist: Path,
-        yes: bool = typer.Option(False, "--yes", "-y", help="Submit without confirmation"),
-        quiet: bool = typer.Option(False, "--quiet", "-q", help="Don't show information about submitted data"),
+    playlists: list[Path],
+    yes: bool = typer.Option(False, "--yes", "-y", help="Submit without confirmation"),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Don't show information about submitted data"
+    ),
 ):
     app_name = "listenbrainz_vdj8_importer"
     config_dir = user_config_dir(app_name)
     os.makedirs(config_dir, exist_ok=True)
     config_file = os.path.join(config_dir, "config.toml")
 
-    try: config = toml.load(config_file)
+    try:
+        config = toml.load(config_file)
     except FileNotFoundError:
-        print("The config file {config_file} does not exist".format(config_file=config_file))
+        print(f"The config file {config_file} does not exist", file=sys.stderr)
         exit(1)
     user_token = config["listenbrainz"]["user_token"]
 
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     client = liblistenbrainz.ListenBrainz()
 
-    if not playlist.exists():
-        print("The playlist {playlist_file} does not exist".format(playlist_file=playlist))
-        exit(1)
-
-    print(f"Processing playlist: {playlist}")
-
     try:
         client.set_auth_token(user_token)
     except InvalidAuthTokenException as invalid_auth_token_exception:
-        print("The token is invalid: {invalid_auth_token_exception}")
+        print(f"The token is invalid: {invalid_auth_token_exception}")
         exit(1)
     except ListenBrainzAPIException as api_exception:
-        print("The ListenBrainz API encountered an error: {api_exception}")
+        print(
+            f"The ListenBrainz API encountered an error: {api_exception}",
+            file=sys.stderr,
+        )
 
-    listens = parse_vdj_playlist(playlist)
-    if len(listens) == 0:
-        print("No listens found")
-        exit(0)
+    has_error = False
 
-    if not quiet:
-        print_listens(listens)
+    for playlist in playlists:
+        if not playlist.exists():
+            print(f"The playlist {playlist} does not exist", file=sys.stderr)
+            exit(1)
 
-    if yes:
-        client.submit_multiple_listens(listens)
-        exit(0)
+        print(f"Processing playlist: {playlist}")
+        listens = parse_vdj_playlist(playlist)
+        if len(listens) == 0:
+            print("No listens found", file=sys.stderr)
 
-    if not interactive:
-        print("Can't ask for confirmation, exiting")
+        if not quiet:
+            print_listens(listens)
+
+        if yes:
+            client.submit_multiple_listens(listens)
+            continue
+
+        if not interactive:
+            print("Can't ask for confirmation, exiting", file=sys.stderr)
+            exit(1)
+
+        response = input("Do you want to submit your listens? [Y/n] ").strip().lower()
+        if response in ("", "y", "yes"):
+            try:
+                client.submit_multiple_listens(listens)
+            except ListenBrainzAPIException as api_exception:
+                print(
+                    f"The ListenBrainz API encountered an error: {api_exception}",
+                    file=sys.stderr,
+                )
+                has_error = True
+            except InvalidSubmitListensPayloadException as payload_exception:
+                print(
+                    f"The ListenBrainz API rejected the payload: {payload_exception}",
+                    file=sys.stderr,
+                )
+                has_error = True
+
+    if has_error:
         exit(1)
 
-    response = input("Do you want to submit your listens? [Y/n] ").strip().lower()
-    if response in ("", "y", "yes"):
-        try:
-            client.submit_multiple_listens(listens)
-            exit(0)
-        except ListenBrainzAPIException as api_exception:
-            print("The ListenBrainz API encountered an error: {api_exception}")
-            exit(1)
-        except InvalidSubmitListensPayloadException as payload_exception:
-            print("The ListenBrainz API rejected the payload: {payload_exception}")
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     typer.run(main)
